@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pushmfa
+      POSTGRES_USER: pushmfa
+      POSTGRES_PASSWORD: secret
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pushmfa"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      ASPNETCORE_URLS: http://+:5000
+      ConnectionStrings__Postgres: Host=postgres;Database=pushmfa;Username=pushmfa;Password=secret
+      ConnectionStrings__Redis: redis:6379
+      Jwt__Key: push-mfa-super-secret-key-change-in-prod!!
+      Jwt__Issuer: push-mfa
+      Jwt__Audience: push-mfa
+      Jwt__ExpiryHours: "8"
+      LongPollTimeoutSeconds: "60"
+    ports:
+      - "5000:5000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  web-app:
+    build:
+      context: ./web-app
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:5000
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+
+volumes:
+  postgres_data:
