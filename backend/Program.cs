@@ -26,6 +26,23 @@ builder.Services.AddScoped<IAuthService, AuthService>();
 builder.Services.AddSingleton<IConnectionMultiplexer>(_ =>
     ConnectionMultiplexer.Connect(builder.Configuration.GetConnectionString("Redis")!));
 
+builder.Services.AddHttpClient("clickhouse", (sp, client) =>
+{
+    var connStr = sp.GetRequiredService<IConfiguration>().GetConnectionString("ClickHouse")!;
+    // connStr format: http://user:pass@host:port/dbname
+    // ClickHouse HTTP interface lives at the root — strip the db path, pass credentials via headers
+    var uri = new Uri(connStr);
+    client.BaseAddress = new Uri($"{uri.Scheme}://{uri.Host}:{uri.Port}");
+    if (!string.IsNullOrEmpty(uri.UserInfo))
+    {
+        var parts = uri.UserInfo.Split(':', 2);
+        client.DefaultRequestHeaders.Add("X-ClickHouse-User", parts[0]);
+        if (parts.Length > 1)
+            client.DefaultRequestHeaders.Add("X-ClickHouse-Key", parts[1]);
+    }
+});
+builder.Services.AddSingleton<ClickHouseService>();
+
 builder.Services.AddCors(options =>
     options.AddDefaultPolicy(policy =>
         policy.AllowAnyOrigin().AllowAnyMethod().AllowAnyHeader()));

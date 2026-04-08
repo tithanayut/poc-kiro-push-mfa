@@ -1,4 +1,23 @@
 services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26.3-alpine
+    ports:
+      - "8123:8123"   # HTTP interface (used by backend + CH-UI)
+      - "9000:9000"   # native TCP
+    environment:
+      CLICKHOUSE_DB: pushmfa
+      CLICKHOUSE_USER: pushmfa
+      CLICKHOUSE_PASSWORD: secret
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
   postgres:
     image: postgres:16-alpine
     environment:
@@ -33,6 +52,7 @@ services:
       ASPNETCORE_URLS: http://+:5000
       ConnectionStrings__Postgres: Host=postgres;Database=pushmfa;Username=pushmfa;Password=secret
       ConnectionStrings__Redis: redis:6379
+      ConnectionStrings__ClickHouse: http://pushmfa:secret@clickhouse:8123/pushmfa
       Jwt__Key: push-mfa-super-secret-key-change-in-prod!!
       Jwt__Issuer: push-mfa
       Jwt__Audience: push-mfa
@@ -44,6 +64,8 @@ services:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      clickhouse:
         condition: service_healthy
 
   web-app:
@@ -59,3 +81,4 @@ services:
 
 volumes:
   postgres_data:
+  clickhouse_data:

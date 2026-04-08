@@ -19,17 +19,20 @@ public class PushController : ControllerBase
     private readonly IVapidKeyProvider _vapidKeyProvider;
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly int _longPollTimeoutSeconds;
+    private readonly ClickHouseService _clickHouse;
 
     public PushController(
         IConnectionMultiplexer redis,
         IVapidKeyProvider vapidKeyProvider,
         IServiceScopeFactory scopeFactory,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        ClickHouseService clickHouse)
     {
         _redis = redis;
         _vapidKeyProvider = vapidKeyProvider;
         _scopeFactory = scopeFactory;
         _longPollTimeoutSeconds = configuration.GetValue<int>("LongPollTimeoutSeconds", 60);
+        _clickHouse = clickHouse;
     }
 
     [Authorize(Roles = "TenantUser,TenantAdmin")]
@@ -170,6 +173,7 @@ public class PushController : ControllerBase
         }
         catch (WebPushException)
         {
+            _ = _clickHouse.RecordMfaEventAsync(requestId, request.TenantId, userId, request.AppId, app.Name, request.Username, "push_failed", request.Message);
             return StatusCode(502, new { error = "push delivery failed" });
         }
 
@@ -196,10 +200,12 @@ public class PushController : ControllerBase
             cts.Token.Register(() => tcs.TrySetCanceled());
 
             var response = await tcs.Task;
+            _ = _clickHouse.RecordMfaEventAsync(requestId, request.TenantId, userId, request.AppId, app.Name, request.Username, response, request.Message);
             return Ok(new { request_id = requestId, response });
         }
         catch (OperationCanceledException)
         {
+            _ = _clickHouse.RecordMfaEventAsync(requestId, request.TenantId, userId, request.AppId, app.Name, request.Username, "timed_out", request.Message);
             return StatusCode(408, new { error = "request timed out" });
         }
         finally

@@ -26,19 +26,22 @@ public class TenantController : ControllerBase
     private readonly IConnectionMultiplexer _redis;
     private readonly IVapidKeyProvider _vapidKeyProvider;
     private readonly int _longPollTimeoutSeconds;
+    private readonly ClickHouseService _clickHouse;
 
     public TenantController(
         PushMfaDbContext db,
         AppSecretService secretService,
         IConnectionMultiplexer redis,
         IVapidKeyProvider vapidKeyProvider,
-        IConfiguration configuration)
+        IConfiguration configuration,
+        ClickHouseService clickHouse)
     {
         _db = db;
         _secretService = secretService;
         _redis = redis;
         _vapidKeyProvider = vapidKeyProvider;
         _longPollTimeoutSeconds = configuration.GetValue<int>("LongPollTimeoutSeconds", 60);
+        _clickHouse = clickHouse;
     }
 
     private Guid? GetTenantId()
@@ -370,6 +373,7 @@ public class TenantController : ControllerBase
         }
         catch (WebPushException)
         {
+            _ = _clickHouse.RecordMfaEventAsync(requestId, tenantId.Value, userId, defaultApp.Id, defaultApp.Name, user.Username, "push_failed", "Simulate push from Tenant Admin");
             return StatusCode(502, new { error = "push delivery failed" });
         }
 
@@ -393,10 +397,12 @@ public class TenantController : ControllerBase
             using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(_longPollTimeoutSeconds));
             cts.Token.Register(() => tcs.TrySetCanceled());
             var response = await tcs.Task;
+            _ = _clickHouse.RecordMfaEventAsync(requestId, tenantId.Value, userId, defaultApp.Id, defaultApp.Name, user.Username, response, "Simulate push from Tenant Admin");
             return Ok(new { request_id = requestId, response });
         }
         catch (OperationCanceledException)
         {
+            _ = _clickHouse.RecordMfaEventAsync(requestId, tenantId.Value, userId, defaultApp.Id, defaultApp.Name, user.Username, "timed_out", "Simulate push from Tenant Admin");
             return StatusCode(408, new { error = "request timed out" });
         }
         finally
