@@ -34,3 +34,6 @@ web-app/dist-ssr/
 *.log
 npm-debug.log*
 yarn-debug.log*
+
+# Airflow generated reports
+airflow/reports/
