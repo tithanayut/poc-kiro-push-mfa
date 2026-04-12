@@ -3,6 +3,8 @@ using backend.Services;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.IdentityModel.Tokens;
+using OpenTelemetry.Resources;
+using OpenTelemetry.Trace;
 using StackExchange.Redis;
 using System.IdentityModel.Tokens.Jwt;
 using System.Text;
@@ -42,6 +44,22 @@ builder.Services.AddHttpClient("clickhouse", (sp, client) =>
     }
 });
 builder.Services.AddSingleton<ClickHouseService>();
+
+builder.Services.AddOpenTelemetry()
+    .ConfigureResource(r => r.AddService(
+        serviceName: builder.Configuration["OpenTelemetry:ServiceName"] ?? "push-mfa-backend",
+        serviceVersion: "1.0.0"))
+    .WithTracing(tracing => tracing
+        .AddSource("push-mfa-backend")
+        .AddAspNetCoreInstrumentation(o => o.RecordException = true)
+        .AddHttpClientInstrumentation()
+        .AddEntityFrameworkCoreInstrumentation(o => o.SetDbStatementForText = true)
+        .AddRedisInstrumentation()
+        .AddOtlpExporter(o =>
+        {
+            o.Endpoint = new Uri(
+                builder.Configuration["OpenTelemetry:Endpoint"] ?? "http://localhost:4317");
+        }));
 
 builder.Services.AddCors(options =>
     options.AddDefaultPolicy(policy =>

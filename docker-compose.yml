@@ -58,6 +58,8 @@ services:
       Jwt__Audience: push-mfa
       Jwt__ExpiryHours: "8"
       LongPollTimeoutSeconds: "60"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://tempo:4317
+      OTEL_SERVICE_NAME: push-mfa-backend
     ports:
       - "5000:5000"
     depends_on:
@@ -67,6 +69,8 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
+      tempo:
+        condition: service_started
 
   web-app:
     build:
@@ -152,7 +156,42 @@ services:
       timeout: 10s
       retries: 5
 
+  tempo:
+    image: grafana/tempo:2.7.2
+    command: ["-config.file=/etc/tempo.yaml", "-target=all"]
+    volumes:
+      - ./observability/tempo.yaml:/etc/tempo.yaml
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"   # Tempo HTTP API
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+
+  tempo-cors-proxy:
+    image: nginx:alpine
+    volumes:
+      - ./observability/tempo-cors.nginx.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "4319:4318"
+    depends_on:
+      - tempo
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+    volumes:
+      - ./observability/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - tempo
+
 volumes:
   postgres_data:
   clickhouse_data:
   redpanda_data:
+  tempo_data:
+  grafana_data:

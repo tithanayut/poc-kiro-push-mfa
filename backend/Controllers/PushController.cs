@@ -12,9 +12,13 @@ using WebPush;
 
 namespace backend.Controllers;
 
+using System.Diagnostics;
+
 [ApiController]
 public class PushController : ControllerBase
 {
+    private static readonly ActivitySource _tracer = new("push-mfa-backend");
+
     private readonly IConnectionMultiplexer _redis;
     private readonly IVapidKeyProvider _vapidKeyProvider;
     private readonly IServiceScopeFactory _scopeFactory;
@@ -124,29 +128,35 @@ public class PushController : ControllerBase
         using var scope = _scopeFactory.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<PushMfaDbContext>();
 
-        var app = await db.TenantApps
-            .FirstOrDefaultAsync(a => a.Id == request.AppId && a.TenantId == request.TenantId);
-        if (app is null)
-            return Unauthorized(new { error = "unauthorized" });
+        TenantApp? app;
+        using (var span = _tracer.StartActivity("ValidateAppCredentials"))
+        {
+            span?.SetTag("app.id", request.AppId);
+            span?.SetTag("tenant.id", request.TenantId);
+            app = await db.TenantApps
+                .FirstOrDefaultAsync(a => a.Id == request.AppId && a.TenantId == request.TenantId);
+            if (app is null)
+                return Unauthorized(new { error = "unauthorized" });
+            if (bearerToken != app.Secret)
+                return Unauthorized(new { error = "unauthorized" });
+            if (app.IsDisabled)
+                return StatusCode(403, new { error = "app_disabled" });
+        }
 
-        // Validate bearer token against app secret
-        if (bearerToken != app.Secret)
-            return Unauthorized(new { error = "unauthorized" });
-
-        // Check if app is disabled
-        if (app.IsDisabled)
-            return StatusCode(403, new { error = "app_disabled" });
-
-        // Look up user by TenantId + Username
-        var user = await db.Users
-            .FirstOrDefaultAsync(u => u.TenantId == request.TenantId && u.Username == request.Username);
-        if (user is null)
-            return NotFound(new { error = "user_not_found" });
-
-        // Look up push subscription by user ID
-        var sub = await db.PushSubscriptions.FindAsync(user.Id);
-        if (sub is null)
-            return NotFound(new { error = "device_not_found" });
+        User? user;
+        PushSubscriptionEntity? sub;
+        using (var span = _tracer.StartActivity("LookupUserAndSubscription"))
+        {
+            span?.SetTag("tenant.id", request.TenantId);
+            span?.SetTag("username", request.Username);
+            user = await db.Users
+                .FirstOrDefaultAsync(u => u.TenantId == request.TenantId && u.Username == request.Username);
+            if (user is null)
+                return NotFound(new { error = "user_not_found" });
+            sub = await db.PushSubscriptions.FindAsync(user.Id);
+            if (sub is null)
+                return NotFound(new { error = "device_not_found" });
+        }
 
         var userId = user.Id;
         var requestId = Guid.NewGuid().ToString();
@@ -165,6 +175,9 @@ public class PushController : ControllerBase
         // Send Web Push notification
         try
         {
+            using var span = _tracer.StartActivity("SendWebPushNotification");
+            span?.SetTag("request.id", requestId);
+            span?.SetTag("push.endpoint", sub.Endpoint);
             var webPushSub = new WebPush.PushSubscription(sub.Endpoint, sub.P256dh, sub.Auth);
             var vapidKey = await _vapidKeyProvider.GetAsync();
             var client = new WebPushClient();
@@ -185,6 +198,9 @@ public class PushController : ControllerBase
             TimeSpan.FromSeconds(_longPollTimeoutSeconds));
 
         // Wait for response via Redis pub/sub
+        using var pollSpan = _tracer.StartActivity("WaitForUserResponse");
+        pollSpan?.SetTag("request.id", requestId);
+        pollSpan?.SetTag("timeout.seconds", _longPollTimeoutSeconds);
         var channel = RedisChannel.Literal($"response:{requestId}");
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var sub2 = _redis.GetSubscriber();

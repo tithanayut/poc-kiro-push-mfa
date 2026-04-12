@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
@@ -21,6 +22,8 @@ public record UpdateAppRequest(string? Name, bool? IsDisabled);
 [Authorize(Roles = "TenantAdmin")]
 public class TenantController : ControllerBase
 {
+    private static readonly ActivitySource _tracer = new("push-mfa-backend");
+
     private readonly PushMfaDbContext _db;
     private readonly AppSecretService _secretService;
     private readonly IConnectionMultiplexer _redis;
@@ -332,23 +335,28 @@ public class TenantController : ControllerBase
         if (tenantId is null) return Unauthorized();
 
         // Verify user belongs to this tenant
-        var user = await _db.Users.FindAsync(userId);
-        if (user is null || user.TenantId != tenantId)
-            return NotFound(new { error = "user_not_found" });
+        User? user;
+        TenantApp? defaultApp;
+        PushSubscriptionEntity? sub;
+        using (var span = _tracer.StartActivity("LookupUserAndSubscription"))
+        {
+            span?.SetTag("tenant.id", tenantId);
+            span?.SetTag("user.id", userId);
+            user = await _db.Users.FindAsync(userId);
+            if (user is null || user.TenantId != tenantId)
+                return NotFound(new { error = "user_not_found" });
 
-        // Look up the default app for this tenant
-        var defaultApp = await _db.TenantApps
-            .FirstOrDefaultAsync(a => a.TenantId == tenantId && a.IsDefault);
-        if (defaultApp is null)
-            return StatusCode(500, new { error = "default_app_not_found" });
+            defaultApp = await _db.TenantApps
+                .FirstOrDefaultAsync(a => a.TenantId == tenantId && a.IsDefault);
+            if (defaultApp is null)
+                return StatusCode(500, new { error = "default_app_not_found" });
+            if (defaultApp.IsDisabled)
+                return StatusCode(403, new { error = "app_disabled" });
 
-        if (defaultApp.IsDisabled)
-            return StatusCode(403, new { error = "app_disabled" });
-
-        // Look up push subscription
-        var sub = await _db.PushSubscriptions.FindAsync(userId);
-        if (sub is null)
-            return NotFound(new { error = "device_not_found" });
+            sub = await _db.PushSubscriptions.FindAsync(userId);
+            if (sub is null)
+                return NotFound(new { error = "device_not_found" });
+        }
 
         var requestId = Guid.NewGuid().ToString();
         var expiresAt = DateTimeOffset.UtcNow.AddSeconds(_longPollTimeoutSeconds).ToUnixTimeSeconds();
@@ -365,6 +373,9 @@ public class TenantController : ControllerBase
 
         try
         {
+            using var span = _tracer.StartActivity("SendWebPushNotification");
+            span?.SetTag("request.id", requestId);
+            span?.SetTag("push.endpoint", sub.Endpoint);
             var webPushSub = new WebPush.PushSubscription(sub.Endpoint, sub.P256dh, sub.Auth);
             var vapidKey = await _vapidKeyProvider.GetAsync();
             var client = new WebPushClient();
@@ -378,19 +389,34 @@ public class TenantController : ControllerBase
         }
 
         var redisDb = _redis.GetDatabase();
-        await redisDb.StringSetAsync(
-            $"pending:{requestId}",
-            userId.ToString(),
-            TimeSpan.FromSeconds(_longPollTimeoutSeconds));
+        using (var span = _tracer.StartActivity("Redis.SetPendingRequest"))
+        {
+            span?.SetTag("request.id", requestId);
+            span?.SetTag("redis.key", $"pending:{requestId}");
+            span?.SetTag("redis.ttl.seconds", _longPollTimeoutSeconds);
+            await redisDb.StringSetAsync(
+                $"pending:{requestId}",
+                userId.ToString(),
+                TimeSpan.FromSeconds(_longPollTimeoutSeconds));
+        }
 
         var channel = RedisChannel.Literal($"response:{requestId}");
         var tcs = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         var subscriber = _redis.GetSubscriber();
 
-        await subscriber.SubscribeAsync(channel, (_, message) =>
+        using (var span = _tracer.StartActivity("Redis.SubscribeResponseChannel"))
         {
-            tcs.TrySetResult(message.ToString());
-        });
+            span?.SetTag("request.id", requestId);
+            span?.SetTag("redis.channel", $"response:{requestId}");
+            await subscriber.SubscribeAsync(channel, (_, message) =>
+            {
+                tcs.TrySetResult(message.ToString());
+            });
+        }
+
+        using var pollSpan = _tracer.StartActivity("WaitForUserResponse");
+        pollSpan?.SetTag("request.id", requestId);
+        pollSpan?.SetTag("timeout.seconds", _longPollTimeoutSeconds);
 
         try
         {
