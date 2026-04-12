@@ -661,6 +661,13 @@
   color: var(--muted);
 }
 
+.lp-footer-repo {
+  color: var(--muted);
+  text-decoration: none;
+  transition: color 0.15s;
+}
+.lp-footer-repo:hover { color: var(--text); }
+
 /* ── Responsive ── */
 @media (max-width: 768px) {
   .lp-hero {

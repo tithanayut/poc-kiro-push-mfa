@@ -210,7 +210,7 @@ export default function LandingPage() {
       <section className="lp-hero">
         <div className="lp-hero-glow" />
         <AnimatedSection className="lp-hero-content">
-          <div className="lp-badge">Open-source · Self-hosted · Intuitive</div>
+          <div className="lp-badge">Open-source · Self-hosted · Ready in seconds</div>
           <h1>Push-based MFA<br /><span>that everyone loves</span></h1>
           <p className="lp-hero-sub">
             One HTTP call. Your user taps Accept. You get a synchronous response.<br />
@@ -415,6 +415,14 @@ export default function LandingPage() {
       {/* FOOTER */}
       <footer className="lp-footer">
         <span className="lp-logo">Push<span>MFA</span></span>
+        <a
+          className="lp-footer-repo"
+          href="https://github.com/tithanayut/poc-kiro-push-mfa"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          GitHub ↗
+        </a>
       </footer>
     </div>
   )
